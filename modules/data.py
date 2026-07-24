@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import requests
@@ -97,23 +98,35 @@ def load_portfolio(file_bytes: bytes) -> pd.DataFrame:
 
 @st.cache_data(ttl="1h", show_spinner="Building universe…")
 def get_universe_df() -> pd.DataFrame:
-    """Fetch Sector / Industry / Price / Beta / Target for every ticker in CANDIDATE_TICKERS."""
-    rows: list[dict] = []
-    for ticker in CANDIDATE_TICKERS:
+    """Fetch Sector / Industry / Price / Beta / Target for every ticker in CANDIDATE_TICKERS.
+
+    Uses a thread pool to parallelise the ~80 yfinance HTTP calls.
+    """
+    def _fetch_row(ticker: str) -> dict | None:
         info = _fetch_info(ticker)
         if info is None:
-            continue
+            return None
         price = info.get("currentPrice") or info.get("regularMarketPrice") or 0.0
-        target = info.get("targetMeanPrice")
-        beta = info.get("beta")
-        rows.append({
+        return {
             "Ticker": ticker,
             "Sector": info.get("sector", "Unknown"),
             "Industry": info.get("industry", "Unknown"),
             "Price": price,
-            "Beta": beta,
-            "Target Price": target,
-        })
+            "Beta": info.get("beta"),
+            "Target Price": info.get("targetMeanPrice"),
+        }
+
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        futures = {pool.submit(_fetch_row, t): t for t in CANDIDATE_TICKERS}
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                rows.append(result)
+
+    # Sort back to original order for stable output
+    order = {t: i for i, t in enumerate(CANDIDATE_TICKERS)}
+    rows.sort(key=lambda r: order.get(r["Ticker"], 999))
     return pd.DataFrame(rows)
 
 

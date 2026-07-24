@@ -92,12 +92,9 @@ def get_recommendations(
     ]["Ticker"].tolist()
 
     similar_sentiment = score_tickers_bulk(similar_candidates)
-    bullish_similar = (
-        similar_sentiment[similar_sentiment["Label"] == "Bullish"]
-        .sort_values("Score", ascending=False)
-        .head(10)
-    )
-    similar_rows = _build_rows(bullish_similar, universe, portfolio_sectors_tuple)
+    # Take top 10 by score regardless of label — user filters handle label/score thresholds
+    top_similar = similar_sentiment.sort_values("Score", ascending=False).head(10)
+    similar_rows = _build_rows(top_similar, universe, portfolio_sectors_tuple)
     similar_df = pd.DataFrame(similar_rows) if similar_rows else pd.DataFrame(
         columns=["Ticker", "Sector", "Industry", "Score", "Label", "Price", "Beta", "Risk", "% to Target", "Why"]
     )
@@ -114,12 +111,8 @@ def get_recommendations(
 
     diversify_candidates = universe[universe["Sector"].isin(underrep_sectors)]["Ticker"].tolist()
     diversify_sentiment = score_tickers_bulk(diversify_candidates)
-    bullish_diversify = (
-        diversify_sentiment[diversify_sentiment["Label"] == "Bullish"]
-        .sort_values("Score", ascending=False)
-        .head(10)
-    )
-    diversify_rows = _build_rows(bullish_diversify, universe, portfolio_sectors_tuple)
+    top_diversify = diversify_sentiment.sort_values("Score", ascending=False).head(10)
+    diversify_rows = _build_rows(top_diversify, universe, portfolio_sectors_tuple)
     diversify_df = pd.DataFrame(diversify_rows) if diversify_rows else pd.DataFrame(
         columns=["Ticker", "Sector", "Industry", "Score", "Label", "Price", "Beta", "Risk", "% to Target", "Why"]
     )
@@ -140,7 +133,7 @@ def apply_filters(
         out = out[out["Price"] <= max_price]
     if risk_levels and "Risk" in out.columns:
         out = out[out["Risk"].isin(risk_levels)]
-    if min_score > -1.0 and "Score" in out.columns:
+    if "Score" in out.columns:
         out = out[out["Score"] >= min_score]
     if sectors and "Sector" in out.columns:
         out = out[out["Sector"].isin(sectors)]

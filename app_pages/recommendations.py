@@ -36,12 +36,12 @@ with st.form("rec_filters"):
     with f2:
         min_score = st.slider(
             "Min sentiment score",
-            min_value=0.0,
+            min_value=-1.0,
             max_value=1.0,
-            value=0.1,
+            value=0.0,
             step=0.05,
             format="%.2f",
-            help="0 = any bullish · 1 = extremely bullish",
+            help="-1 = show all · 0 = neutral or better · 0.5+ = strongly bullish only",
         )
 
     with f3:
@@ -60,23 +60,24 @@ with st.form("rec_filters"):
     )
 
 # ── Nothing shown until the button is clicked ─────────────────────────────
-if not generate and "rec_results" not in st.session_state:
+if not generate and "rec_has_results" not in st.session_state:
     st.info(
         "Set your filters above and click **Generate Recommendations** to run the analysis.",
         icon=":material/info:",
     )
     st.stop()
 
-# ── Re-run on generate, or reuse cached session results on normal reruns ──
+# ── On submit: snapshot filter values into session state ─────────────────
+# Use a different key ("rec_saved_filters") — never the same as the form key.
 if generate:
-    st.session_state["rec_results"] = None   # clear stale results
-    st.session_state["rec_filters"] = {
+    st.session_state["rec_has_results"] = True
+    st.session_state["rec_saved_filters"] = {
         "max_price": float(max_price),
         "min_score": float(min_score),
         "selected_risk": list(selected_risk) if selected_risk else RISK_LEVELS,
     }
 
-saved_filters = st.session_state.get("rec_filters", {})
+saved_filters = st.session_state.get("rec_saved_filters", {})
 _max_price = saved_filters.get("max_price", 500.0)
 _min_score = saved_filters.get("min_score", 0.1)
 _risk = saved_filters.get("selected_risk", RISK_LEVELS)

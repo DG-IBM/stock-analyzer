@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import streamlit as st
@@ -11,8 +12,8 @@ from modules.data import fetch_news_headlines
 from modules.llm import client, ICA_MODEL
 
 # Batch size: number of tickers scored in a single Claude call.
-# Larger = fewer API calls but bigger prompt. 15 is a safe balance.
-_BATCH_SIZE = 15
+# Smaller = more reliable JSON responses from ICA. 8 is safe.
+_BATCH_SIZE = 8
 
 _SYSTEM_SENTIMENT = """\
 You are a financial sentiment analyst. Given a list of news headlines for a stock ticker, \
@@ -56,9 +57,21 @@ _FALLBACK: dict = {
 
 
 def _parse_json(text: str) -> dict:
-    """Strip optional markdown fences and parse JSON."""
+    """Strip optional markdown fences and parse a JSON object."""
     cleaned = re.sub(r"^```[a-z]*\n?", "", text.strip())
     cleaned = re.sub(r"\n?```$", "", cleaned)
+    return json.loads(cleaned)
+
+
+def _parse_json_list(text: str) -> list:
+    """Extract a JSON array from text, tolerating markdown fences and preamble."""
+    cleaned = re.sub(r"^```[a-z]*\n?", "", text.strip())
+    cleaned = re.sub(r"\n?```$", "", cleaned.strip())
+    # If there's preamble before the '[', slice to the first '['
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start : end + 1]
     return json.loads(cleaned)
 
 
@@ -144,15 +157,16 @@ def _score_batch(tickers_tuple: tuple[str, ...]) -> list[dict]:
     """
     tickers = list(tickers_tuple)
 
-    # Gather headlines for all tickers in this batch
-    sections: list[str] = []
-    for ticker in tickers:
+    # Fetch headlines for all tickers in this batch concurrently
+    def _get_section(ticker: str) -> str:
         headlines = fetch_news_headlines(ticker, max_items=10)
         if headlines:
             joined = "\n".join(f"  - {h}" for h in headlines[:10])
-            sections.append(f"### {ticker}\n{joined}")
-        else:
-            sections.append(f"### {ticker}\n  - No recent headlines available.")
+            return f"### {ticker}\n{joined}"
+        return f"### {ticker}\n  - No recent headlines available."
+
+    with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
+        sections = list(pool.map(_get_section, tickers))
 
     user_msg = "\n\n".join(sections)
 
@@ -163,38 +177,48 @@ def _score_batch(tickers_tuple: tuple[str, ...]) -> list[dict]:
     try:
         response = client.chat.completions.create(
             model=ICA_MODEL,
-            max_tokens=150 * len(tickers),   # ~150 tokens per ticker result
+            max_tokens=200 * len(tickers),   # ~200 tokens per ticker result
             messages=[
                 {"role": "system", "content": _SYSTEM_BULK},
                 {"role": "user", "content": user_msg},
             ],
         )
-        raw = _parse_json(response.choices[0].message.content)
-        # raw should be a list; if Claude returns a dict keyed by ticker, normalise it
+        raw_text = response.choices[0].message.content
+        raw = _parse_json_list(raw_text)
         if isinstance(raw, dict):
             raw = [{"ticker": k, **v} for k, v in raw.items()]
         return raw if isinstance(raw, list) else fallback
-    except Exception:
+    except Exception as e:
+        # Surface the error in the Streamlit sidebar so we can debug
+        import streamlit as _st
+        _st.sidebar.warning(f"Batch score error ({tickers[0]}…): {e}")
         return fallback
 
 
 def score_tickers_bulk(tickers: list[str]) -> pd.DataFrame:
-    """Score multiple tickers via batched Claude calls.
+    """Score multiple tickers via parallel batched Claude calls.
 
-    Splits tickers into chunks of _BATCH_SIZE, fires one Claude call per chunk,
+    Splits tickers into chunks of _BATCH_SIZE, fires ALL chunks concurrently,
     then merges results. Returns DataFrame: Ticker, Score, Label, Reasoning.
     """
     if not tickers:
         return pd.DataFrame(columns=["Ticker", "Score", "Label", "Reasoning"])
 
-    results: list[dict] = []
-    for i in range(0, len(tickers), _BATCH_SIZE):
-        chunk = tickers[i : i + _BATCH_SIZE]
-        results.extend(_score_batch(tuple(chunk)))
+    chunks = [
+        tuple(tickers[i : i + _BATCH_SIZE])
+        for i in range(0, len(tickers), _BATCH_SIZE)
+    ]
 
-    rows = []
+    results: list[dict] = []
+    # Fire all batch calls in parallel — each chunk is an independent Claude request
+    with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+        futures = [pool.submit(_score_batch, chunk) for chunk in chunks]
+        for future in as_completed(futures):
+            results.extend(future.result())
+
     # Index by ticker for quick lookup; fall back to neutral if missing
     result_map = {r.get("ticker", "").upper(): r for r in results}
+    rows = []
     for ticker in tickers:
         r = result_map.get(ticker.upper(), {})
         rows.append({
