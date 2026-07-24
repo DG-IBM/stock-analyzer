@@ -1,0 +1,8 @@
+streamlit
+yfinance
+pandas
+openpyxl
+altair>=5.5.0
+requests
+openai
+python-dotenv
