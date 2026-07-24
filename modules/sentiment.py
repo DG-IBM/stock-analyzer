@@ -149,6 +149,63 @@ def generate_bull_bear_narrative(
         }
 
 
+@st.cache_data(ttl="15m", max_entries=50, show_spinner=False)
+def generate_comparison_verdict(
+    tickers: list[str],
+    ticker_data: list[dict],   # list of {ticker, info, analyst, sentiment}
+    portfolio_context: str,    # plain-text summary of the user's portfolio
+) -> str:
+    """Ask Claude to compare multiple tickers and recommend the best buy.
+
+    Returns a plain markdown string with the verdict.
+    """
+    if not ticker_data:
+        return "No data available for comparison."
+
+    sections: list[str] = []
+    for td in ticker_data:
+        t = td["ticker"]
+        info = td.get("info", {})
+        analyst = td.get("analyst", {})
+        sentiment = td.get("sentiment", {})
+        price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+        target = analyst.get("targetMeanPrice")
+        upside = f"{(target - price) / price * 100:+.1f}%" if target and price else "N/A"
+        rec = (analyst.get("recommendationKey") or "N/A").replace("_", " ").title()
+        beta = info.get("beta", "N/A")
+        sector = info.get("sector", "N/A")
+        sections.append(
+            f"**{t}** ({sector})\n"
+            f"- Price: ${price:,.2f}  |  Analyst target: {'$'+f'{target:,.2f}' if target else 'N/A'}  |  Upside: {upside}\n"
+            f"- Analyst rec: {rec}  |  Beta: {beta}\n"
+            f"- Sentiment score: {sentiment.get('score', 0):+.2f}  ({sentiment.get('label', 'N/A')})\n"
+            f"- Sentiment reasoning: {sentiment.get('reasoning', 'N/A')}"
+        )
+
+    ticker_block = "\n\n".join(sections)
+    prompt = (
+        f"You are a senior equity analyst. Compare these stocks for a potential investor.\n\n"
+        f"{ticker_block}\n\n"
+        f"The investor's current portfolio context:\n{portfolio_context}\n\n"
+        f"Write 3–4 sentences: which stock is the best buy right now and why, "
+        f"considering their existing portfolio. Be direct and specific. "
+        f"Do not use bullet points — write flowing prose."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=ICA_MODEL,
+            max_tokens=350,
+            messages=[
+                {"role": "system", "content": "You are a concise, direct senior equity analyst. Respond in plain prose only."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Could not generate verdict: {e}"
+
+
 @st.cache_data(ttl="15m", show_spinner=False)
 def _score_batch(tickers_tuple: tuple[str, ...]) -> list[dict]:
     """Score a batch of tickers in a single Claude call.
